@@ -317,25 +317,25 @@ if __name__ == '__main__':
     classifier = TextClassifier()
     
     # 加载数据
-    print("加载数据...")
-    classifier.load_data('./data/class_data_v3.csv', './data/valid_data_v3.csv')
+    # print("加载数据...")
+    # classifier.load_data('./data/class_data_v3.csv', './data/valid_data_v3.csv')
     
     # 训练模型 - 使用优化后的策略和轻量级模型
-    print("训练模型...")
-    classifier.train_model(epochs=20, drop_mult=0.5, use_small_model=True)
+    # print("训练模型...")
+    # classifier.train_model(epochs=20, drop_mult=0.5, use_small_model=True)
     
     # 保存模型
-    print("保存模型...")
-    classifier.save_model()
+    # print("保存模型...")
+    # classifier.save_model()
     
     # 评估模型
-    print("\n评估模型性能...")
-    classifier.evaluate_model()
+    # print("\n评估模型性能...")
+    # classifier.evaluate_model()
     
     
     # 测试预测
     print("\n测试预测结果：")
-    test_cases = ["FE 82JD", "H942143Y82", "2023-02-03", "87 7 X30", "D"]
+    test_cases = ["FE 82JD", "H942143Y82", "2023-02-03", "87 7 X30", "D", "202302", "H841"]
     for test_text in test_cases:
         results = classifier.predict(test_text)
         print(f"\n输入: {test_text}")
