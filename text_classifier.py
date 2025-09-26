@@ -65,8 +65,8 @@ class TextClassifier:
             text_col='text',
             label_col='label',
             is_lm=False,
-            seq_len=72,
-            bs=64,
+            seq_len=50,  # 减小序列长度以减少计算量
+            bs=32,       # 适当减小batch size
             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         )
         
@@ -79,6 +79,25 @@ class TextClassifier:
         """预处理文本数据"""
         # 去除多余空格
         text = re.sub(r'\s+', ' ', text.strip())
+        
+        # 特殊格式处理
+        # 标准化日期格式（尝试将各种格式的日期统一表示）
+        if re.search(r'\d{4}[-/]?\d{1,2}[-/]?\d{1,2}', text):
+            # 识别为日期，添加特殊标记帮助模型识别
+            text = f"[DATE] {text}"
+        
+        # 识别IQI_tag模式（通常以F开头，后跟字母和数字）
+        elif re.match(r'^F[A-Z0-9]', text) and len(text) <= 10:
+            text = f"[IQI] {text}"
+        
+        # 识别单个字符的情况（通常是Slice类别）
+        elif len(text.strip()) == 1 and text.isalnum():
+            text = f"[SINGLE_CHAR] {text}"
+        
+        # 识别WelderNo模式（可能包含字母和数字的组合）
+        elif re.match(r'^[A-Z0-9]+$', text) and len(text) > 3:
+            text = f"[WELDER] {text}"
+        
         # 统一格式：转换为大写
         text = text.upper()
         return text
@@ -96,32 +115,123 @@ class TextClassifier:
         for category, count in valid_counts.items():
             logger.info(f"  {category}: {count} ({count/len(valid_df):.2%})")
         
-    def train_model(self, epochs=8, drop_mult=0.3):
+    def train_model(self, epochs=20, drop_mult=0.5, use_small_model=True):
         """训练模型"""
         if self.data_loader is None:
             raise ValueError("请先加载数据")
             
-        # 创建学习器
-        self.learn = text_classifier_learner(
-            self.data_loader,
-            AWD_LSTM,
-            drop_mult=drop_mult,
-            metrics=[accuracy, F1Score(average='macro')]
-        )
+        # 计算类别权重，解决类别不平衡问题
+        # 特别是针对WeldNo(召回率低)和WelderNo(精确度低)等类别
+        def get_class_weights():
+            # 安全地获取训练数据中的类别分布
+            # 避免直接从Dataset构建DataFrame可能出现的问题
+            label_counts = {}            
+            # 遍历训练数据集，统计每个类别的样本数
+            for item in self.data_loader.train_ds:
+                label = item[1]
+                if label in label_counts:
+                    label_counts[label] += 1
+                else:
+                    label_counts[label] = 1
+            
+            total = sum(label_counts.values())
+            
+            # 计算权重（使用1/频率的倒数）
+            weights = {label: total / count for label, count in label_counts.items()}
+            
+            # 为表现不佳的类别增加权重
+            # 根据分类报告，Slice召回率很低，单个字符如"D"被错误预测为WelderNo
+            weights['Slice'] = weights.get('Slice', 1.0) * 10.0  # 大幅增加Slice权重
+            weights['WeldNo'] = weights.get('WeldNo', 1.0) * 1.2
+            # 降低WelderNo权重以减少它对其他类别的"占用"
+            if 'WelderNo' in weights:
+                weights['WelderNo'] = min(weights['WelderNo'], 1.0)
+            
+            # 转换为张量并按照类别顺序排序
+            categories = self.data_loader.vocab[1]
+            weight_tensor = torch.tensor([weights.get(cat, 1.0) for cat in categories], 
+                                         device=self.data_loader.device)
+            return weight_tensor
         
+        # 选择模型：使用更轻量级的模型架构，但增加对关键特征的提取能力
+        if use_small_model:
+            # 使用更轻量但更强大的模型架构
+            logger.info("使用优化的轻量级模型进行训练...")
+            # 自定义优化的小型模型
+            class EnhancedSmallRNN(nn.Module):
+                def __init__(self, vocab_sz, emb_sz, n_hid, n_out, n_layers=2, drop_p=0.3):
+                    super().__init__()
+                    # 嵌入层
+                    self.emb = nn.Embedding(vocab_sz, emb_sz)
+                    # 使用双向GRU代替RNN，提高特征提取能力
+                    self.rnn = nn.GRU(emb_sz, n_hid, n_layers, 
+                                     batch_first=True, 
+                                     dropout=drop_p if n_layers > 1 else 0, 
+                                     bidirectional=True)
+                    # 注意力机制层，帮助模型关注重要特征
+                    self.attention = nn.Sequential(
+                        nn.Linear(n_hid * 2, 64),
+                        nn.Tanh(),
+                        nn.Linear(64, 1)
+                    )
+                    # 输出层
+                    self.out = nn.Linear(n_hid * 2, n_out)
+                    self.drop = nn.Dropout(drop_p)
+                
+                def forward(self, x):
+                    # 嵌入层
+                    x = self.emb(x)
+                    x = self.drop(x)
+                    # RNN层
+                    output, hidden = self.rnn(x)
+                    # 注意力机制
+                    attn_weights = torch.softmax(self.attention(output).squeeze(2), dim=1)
+                    attn_output = torch.sum(attn_weights.unsqueeze(2) * output, dim=1)
+                    # 输出层
+                    x = self.out(attn_output)
+                    return x
+            
+            # 创建自定义模型
+            vocab_sz = len(self.data_loader.vocab[0])
+            emb_sz = 128  # 稍微增加嵌入维度以捕获更多特征
+            n_hid = 128   # 隐藏层大小
+            n_out = len(self.data_loader.vocab[1])
+            model = EnhancedSmallRNN(vocab_sz, emb_sz, n_hid, n_out, n_layers=2, drop_p=drop_mult)
+            
+            # 获取类别权重
+            class_weights = get_class_weights()
+            logger.info(f"使用类别权重: {dict(zip(self.data_loader.vocab[1], class_weights.tolist()))}")
+            
+            # 创建学习器，使用加权交叉熵损失函数
+            self.learn = Learner(
+                self.data_loader,
+                model,
+                loss_func=CrossEntropyLossFlat(weight=class_weights),
+                metrics=[accuracy, F1Score(average='macro')],
+                cbs=[SaveModelCallback(monitor='accuracy', fname='best_model')]
+            )
+        else:
+            # 使用传统的AWD_LSTM模型
+            self.learn = text_classifier_learner(
+                self.data_loader,
+                AWD_LSTM,
+                drop_mult=drop_mult,
+                metrics=[accuracy, F1Score(average='macro')],
+                cbs=[SaveModelCallback(monitor='accuracy', fname='best_model')]
+            )
+            
         # 查找最佳学习率
         lr_finder = self.learn.lr_find()
         self.best_lr = lr_finder.valley
         logger.info(f"最佳学习率: {self.best_lr:.6f}")
         
-        # 冻结预训练层，先训练头部
-        logger.info("开始训练模型头部...")
-        self.learn.fit_one_cycle(3, self.best_lr)
-        
-        # 解冻所有层，继续训练
-        logger.info("解冻所有层，继续训练...")
-        self.learn.unfreeze()
-        self.learn.fit_one_cycle(epochs-3, slice(self.best_lr/10, self.best_lr))
+        # 改进的训练策略：使用学习率调度和早停
+        # 1. 先使用较低学习率训练所有层
+        logger.info("开始训练模型...")
+        self.learn.fit_one_cycle(epochs, self.best_lr, cbs=[
+            EarlyStoppingCallback(monitor='accuracy', patience=3),  # 早停防止过拟合
+            ReduceLROnPlateau(monitor='valid_loss', min_delta=0.01, patience=2)  # 自动降低学习率
+        ])
         
         # 保存训练历史
         self.history = self.learn.recorder.values
@@ -210,9 +320,9 @@ if __name__ == '__main__':
     print("加载数据...")
     classifier.load_data('./data/class_data_v3.csv', './data/valid_data_v3.csv')
     
-    # 训练模型
+    # 训练模型 - 使用优化后的策略和轻量级模型
     print("训练模型...")
-    classifier.train_model(epochs=40, drop_mult=0.3)
+    classifier.train_model(epochs=20, drop_mult=0.5, use_small_model=True)
     
     # 保存模型
     print("保存模型...")
