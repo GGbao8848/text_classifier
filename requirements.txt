@@ -2,3 +2,5 @@ fastai>=2.7.9
 pandas>=1.5.0
 numpy>=1.23.0
 scikit-learn>=1.2.0
+onnx>=1.19.0
+onnxruntime>=1.16.0
