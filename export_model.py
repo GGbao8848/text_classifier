@@ -3,6 +3,8 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import os
 import onnxruntime as ort
 import numpy as np
+import json
+import shutil
 
 """
 模型导出工具 - 将训练好的BERT模型导出为ONNX或TorchScript格式
@@ -44,6 +46,25 @@ def export_to_onnx(model, tokenizer, output_path):
     )
     
     print(f"模型已成功导出为ONNX格式: {output_path}")
+    
+    # 保存tokenizer信息以实现解耦
+    tokenizer_info = {
+        'vocab': tokenizer.get_vocab(),
+        'cls_token': tokenizer.cls_token,
+        'sep_token': tokenizer.sep_token,
+        'pad_token': tokenizer.pad_token,
+        'unk_token': tokenizer.unk_token,
+        'model_max_length': tokenizer.model_max_length,
+        'do_lower_case': getattr(tokenizer, 'do_lower_case', False),
+        'clean_up_tokenization_spaces': getattr(tokenizer, 'clean_up_tokenization_spaces', True)
+    }
+    
+    # 保存tokenizer信息到JSON文件
+    tokenizer_info_path = output_path.replace('.onnx', '_tokenizer_info.json')
+    with open(tokenizer_info_path, 'w', encoding='utf-8') as f:
+        json.dump(tokenizer_info, f, ensure_ascii=False, indent=2)
+    
+    print(f"Tokenizer信息已保存: {tokenizer_info_path}")
 
 def export_to_torchscript(model, tokenizer, output_path):
     """将模型导出为TorchScript格式"""
