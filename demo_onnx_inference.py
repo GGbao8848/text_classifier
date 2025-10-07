@@ -147,7 +147,7 @@ def main():
     onnx_model_path = "./exported_models/model.onnx"
     
     # 示例文本
-    test_texts = ["FB 27J A", "H942143Y82", "R203", "2023", "87 7 X30", "D"]
+    test_texts = ["FB 27J A", "FB27JB","H942143Y82", "R203", "2023", "87 7 X30", "D"]
     
     # 加载模型和自定义分词器
     print("正在加载模型和分词器...")
